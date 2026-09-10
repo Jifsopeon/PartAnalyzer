@@ -404,7 +404,7 @@ public sealed class DuckDbDataService : IDisposable
     {
         if (_connection is null || _currentDataset?.ProcessingSession is null) return Array.Empty<FilterValueOption>();
         cancellationToken.ThrowIfCancellationRequested();
-        var expression = GetSessionFilterExpression(column);
+        var expression = GetSessionFilterValueExpression(column);
         using var command = _connection.CreateCommand();
         var hasSearch = !string.IsNullOrWhiteSpace(searchText);
         command.CommandText = $"SELECT {expression} AS value, COUNT(*) AS value_count FROM {SourceTableName} WHERE " +
@@ -414,7 +414,16 @@ public sealed class DuckDbDataService : IDisposable
         AddParameter(command, limit);
         using var reader = command.ExecuteReader();
         var results = new List<FilterValueOption>();
-        while (reader.Read()) results.Add(new FilterValueOption { Value = reader.IsDBNull(0) ? null : reader.GetString(0), DisplayValue = reader.IsDBNull(0) ? "(Blank)" : reader.GetString(0), Count = Convert.ToInt64(reader.GetValue(1)) });
+        while (reader.Read())
+        {
+            var value = reader.IsDBNull(0) ? null : reader.GetString(0);
+            results.Add(new FilterValueOption
+            {
+                Value = value,
+                DisplayValue = value is null || value == FilterSelectionValues.BlankCategory ? "(Blank)" : value,
+                Count = Convert.ToInt64(reader.GetValue(1))
+            });
+        }
         return results;
     }
 
@@ -428,8 +437,21 @@ public sealed class DuckDbDataService : IDisposable
         {
             var values = selections.ValuesFor(column);
             if (values.Count == 0) continue;
-            conditions.Add($"{GetSessionFilterExpression(column)} IN ({string.Join(", ", values.Select(_ => "?"))})");
-            foreach (var value in values) AddParameter(command, value);
+            var expression = GetSessionFilterExpression(column);
+            var nonBlankValues = column == SessionFilterColumn.Category
+                ? values.Where(value => value != FilterSelectionValues.BlankCategory).ToList()
+                : values.ToList();
+            var columnConditions = new List<string>();
+            if (nonBlankValues.Count > 0)
+            {
+                columnConditions.Add($"{expression} IN ({string.Join(", ", nonBlankValues.Select(_ => "?"))})");
+                foreach (var value in nonBlankValues) AddParameter(command, value);
+            }
+            if (column == SessionFilterColumn.Category && values.Contains(FilterSelectionValues.BlankCategory, StringComparer.Ordinal))
+            {
+                columnConditions.Add($"({expression} IS NULL OR {expression} = '')");
+            }
+            conditions.Add(columnConditions.Count == 1 ? columnConditions[0] : $"({string.Join(" OR ", columnConditions)})");
         }
         command.CommandText = $"SELECT _excel_row_number FROM {SourceTableName}" + (conditions.Count == 0 ? string.Empty : $" WHERE {string.Join(" AND ", conditions)}") + " ORDER BY _excel_row_number;";
         using var reader = command.ExecuteReader();
@@ -448,7 +470,7 @@ public sealed class DuckDbDataService : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             var available = new HashSet<string>(StringComparer.Ordinal);
             using var command = _connection!.CreateCommand();
-            var expression = GetSessionFilterExpression(column);
+            var expression = GetSessionFilterValueExpression(column);
             command.CommandText = $"SELECT DISTINCT {expression} FROM {SourceTableName} WHERE {expression} IN ({string.Join(", ", values.Select(_ => "?"))});";
             foreach (var value in values) AddParameter(command, value);
             using var reader = command.ExecuteReader();
@@ -466,6 +488,14 @@ public sealed class DuckDbDataService : IDisposable
         var logical = column == SessionFilterColumn.PartNumber ? RequiredWorksheetColumn.PartNumber : RequiredWorksheetColumn.Category;
         var mapping = _currentDataset.ProcessingSession.GetRequiredColumn(logical);
         return _currentDataset.Columns.Single(item => item.ExcelColumnNumber == mapping.ExcelColumnNumber).InternalColumnName;
+    }
+
+    private string GetSessionFilterValueExpression(SessionFilterColumn column)
+    {
+        var expression = GetSessionFilterExpression(column);
+        return column == SessionFilterColumn.Category
+            ? $"COALESCE(NULLIF({expression}, ''), '{FilterSelectionValues.BlankCategory}')"
+            : expression;
     }
 
     private PartAnalysisResult AnalyzeParts(PartAnalysisMapping mapping, CancellationToken cancellationToken)
