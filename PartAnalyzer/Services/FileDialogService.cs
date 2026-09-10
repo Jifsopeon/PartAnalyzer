@@ -53,4 +53,9 @@ public sealed class FileDialogService
             MessageBoxImage.Warning,
             MessageBoxResult.Cancel) == MessageBoxResult.OK;
     }
+
+    public bool ConfirmUnavailableSelections(string message)
+    {
+        return MessageBox.Show(message, "Unavailable filter selections", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) == MessageBoxResult.OK;
+    }
 }

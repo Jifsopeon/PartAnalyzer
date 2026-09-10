@@ -18,6 +18,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly WorksheetProcessingSessionService _worksheetProcessingSessionService;
     private readonly FileDialogService _fileDialogService;
     private readonly DuckDbDataService _duckDbDataService;
+    private readonly FidelityExportService _fidelityExportService;
     private readonly AppSettings _settings;
     private readonly AsyncRelayCommand _importWorkbookCommand;
     private readonly AsyncRelayCommand _loadDataCommand;
@@ -31,6 +32,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly AsyncRelayCommand _nextGroupedPageCommand;
     private readonly AsyncRelayCommand _lastGroupedPageCommand;
     private readonly AsyncRelayCommand _exportWorkbookCommand;
+    private readonly AsyncRelayCommand _exportFilteredWorkbookCommand;
     private readonly AsyncRelayCommand _addFilterCommand;
     private readonly AsyncRelayCommand _clearAllFiltersCommand;
     private readonly AsyncRelayCommand _removeAllFiltersCommand;
@@ -96,13 +98,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ExcelWorkbookService excelWorkbookService,
         WorksheetProcessingSessionService worksheetProcessingSessionService,
         FileDialogService fileDialogService,
-        DuckDbDataService duckDbDataService)
+        DuckDbDataService duckDbDataService,
+        FidelityExportService fidelityExportService)
     {
         _settingsService = settingsService;
         _excelWorkbookService = excelWorkbookService;
         _worksheetProcessingSessionService = worksheetProcessingSessionService;
         _fileDialogService = fileDialogService;
         _duckDbDataService = duckDbDataService;
+        _fidelityExportService = fidelityExportService;
         _settings = _settingsService.Load();
         _importWorkbookCommand = new AsyncRelayCommand(ImportWorkbookAsync, () => CanStartInspection);
         _loadDataCommand = new AsyncRelayCommand(LoadDataAsync, () => CanLoadData);
@@ -116,6 +120,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _nextGroupedPageCommand = new AsyncRelayCommand(() => LoadGroupedPageAsync(GroupedPageNumber + 1), () => CanMoveNextGroupedPage);
         _lastGroupedPageCommand = new AsyncRelayCommand(() => LoadGroupedPageAsync(GroupedTotalPages), () => CanMoveNextGroupedPage);
         _exportWorkbookCommand = new AsyncRelayCommand(ExportWorkbookAsync, () => CanExport);
+        _exportFilteredWorkbookCommand = new AsyncRelayCommand(ExportFilteredWorkbookAsync, () => CanExportFilteredWorkbook);
         _addFilterCommand = new AsyncRelayCommand(AddSelectedFilterAsync, () => CanAddFilter);
         _clearAllFiltersCommand = new AsyncRelayCommand(ClearAllFiltersAsync, () => ActiveFilters.Count > 0);
         _removeAllFiltersCommand = new AsyncRelayCommand(RemoveAllFiltersAsync, () => ActiveFilters.Count > 0);
@@ -158,6 +163,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand LastGroupedPageCommand => _lastGroupedPageCommand;
 
     public AsyncRelayCommand ExportWorkbookCommand => _exportWorkbookCommand;
+    public AsyncRelayCommand ExportFilteredWorkbookCommand => _exportFilteredWorkbookCommand;
 
     public AsyncRelayCommand AddFilterCommand => _addFilterCommand;
 
@@ -189,6 +195,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public bool HasUnavailableSelectedValues => _unavailableSelections.Count > 0;
 
     public IReadOnlyList<UnavailableFilterSelection> UnavailableSelections => _unavailableSelections;
+
+    public string ConstrainedFilterSummary => string.Join("   ", ConstrainedFilters.Select(filter => $"{filter.DisplayName}: {(filter.SelectedValues.Count == 0 ? "none" : $"{filter.SelectedValues.Count} selected")}"));
 
     public ObservableCollection<int> RawPageNumbers { get; } = new();
 
@@ -427,6 +435,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         && (SelectedExportModeOption.Mode is ExportMode.ProcessedWorkbook or ExportMode.GroupedPartSummary or ExportMode.CurrentFilteredGroupedParts
             ? _partAnalysisResult is not null
             : true);
+
+    public bool CanExportFilteredWorkbook => !IsBusy && _processingSession is not null && _mavlResult is not null && _loadedDataset is not null;
 
     public ExportModeOption? SelectedExportModeOption
     {
@@ -1053,6 +1063,26 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    private async Task ExportFilteredWorkbookAsync()
+    {
+        if (!CanExportFilteredWorkbook || _processingSession is null || _mavlResult is null) return;
+        var unavailable = await _duckDbDataService.GetUnavailableSelectionsAsync(GetConstrainedFilterSnapshot());
+        if (unavailable.Count > 0 && !_fileDialogService.ConfirmUnavailableSelections("Some selected values are unavailable and will match zero rows. Continue with export?")) return;
+        var rows = await GetMatchingExcelRowNumbersAsync();
+        if (rows.Count == 0) { StatusMessage = "No matching rows."; return; }
+        var destination = _fileDialogService.SelectExportWorkbook(CreateSuggestedExportFileName(_processingSession.WorkbookPath), Path.GetDirectoryName(_processingSession.WorkbookPath));
+        if (destination is null) return;
+        IsExporting = true;
+        StatusMessage = "Exporting...";
+        try
+        {
+            var result = await _fidelityExportService.ExportAsync(_processingSession, _mavlResult, rows, destination);
+            StatusMessage = $"Export completed: {result.ExportedDataRowCount} rows to {result.DestinationPath}";
+        }
+        catch (DuckDbDataException ex) { StatusMessage = ex.Message; }
+        finally { IsExporting = false; }
+    }
+
     private async Task LoadGroupedPageAsync(int pageNumber)
     {
         if (_partAnalysisResult is null)
@@ -1319,6 +1349,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void RaiseCommandStates()
     {
+        _exportFilteredWorkbookCommand.RaiseCanExecuteChanged();
         _importWorkbookCommand.RaiseCanExecuteChanged();
         _loadDataCommand.RaiseCanExecuteChanged();
         _firstPageCommand.RaiseCanExecuteChanged();
@@ -1862,6 +1893,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         if (e.PropertyName == nameof(ConstrainedFilterViewModel.SearchText)) _ = RefreshConstrainedFiltersAsync();
         if (e.PropertyName == nameof(ConstrainedFilterViewModel.SelectedValues))
         {
+            OnPropertyChanged(nameof(ConstrainedFilterSummary));
             _settings.LastUsedFilterSelections = GetConstrainedFilterSnapshot();
             SaveSettings();
             _ = RefreshUnavailableSelectionsAsync();
