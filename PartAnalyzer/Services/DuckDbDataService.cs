@@ -89,6 +89,11 @@ public sealed class DuckDbDataService : IDisposable
         return Task.Run(() => GetUnavailableSelections(selections, cancellationToken), cancellationToken);
     }
 
+    public Task<MavlResult> CalculateMavlAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() => CalculateMavl(cancellationToken), cancellationToken);
+    }
+
     public void ClearDataset()
     {
         if (_connection is null)
@@ -493,6 +498,33 @@ public sealed class DuckDbDataService : IDisposable
             SessionFilterColumn.Manufacturer => ManufacturerComparisonColumnName,
             _ => throw new DuckDbDataException("The selected filter column is not supported.")
         };
+    }
+
+    private MavlResult CalculateMavl(CancellationToken cancellationToken)
+    {
+        using var measurement = PerformanceLogger.Measure("MAVL calculation", $"rows={_currentDataset?.ImportedRowCount ?? 0}");
+        if (_connection is null || _currentDataset?.ProcessingSession is null) throw new DuckDbDataException("Load a validated worksheet before calculating MAVL.");
+        cancellationToken.ThrowIfCancellationRequested();
+        using var command = _connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {SourceTableName} WHERE {PartNumberComparisonColumnName} IS NULL OR {PartNumberComparisonColumnName} = '' OR {ManufacturerComparisonColumnName} IS NULL OR {ManufacturerComparisonColumnName} = '';";
+        if (Convert.ToInt64(command.ExecuteScalar()) != 0) throw new DuckDbDataException("The validated session contains a blank P+F part number or Manufacturer identity.");
+        command.CommandText = $"""
+            WITH part_mavl AS (
+                SELECT {PartNumberComparisonColumnName} AS part_identity,
+                       COUNT(DISTINCT {ManufacturerComparisonColumnName}) > 1 AS is_mavl
+                FROM {SourceTableName}
+                GROUP BY {PartNumberComparisonColumnName}
+            )
+            SELECT sr._excel_row_number, pm.is_mavl
+            FROM {SourceTableName} sr
+            INNER JOIN part_mavl pm ON pm.part_identity = sr.{PartNumberComparisonColumnName}
+            ORDER BY sr._excel_row_number;
+            """;
+        using var reader = command.ExecuteReader();
+        var values = new Dictionary<int, MavlClassification>();
+        while (reader.Read()) values.Add(reader.GetInt32(0), Convert.ToBoolean(reader.GetValue(1)) ? MavlClassification.Yes : MavlClassification.No);
+        if (values.Count != _currentDataset.ImportedRowCount) throw new DuckDbDataException("MAVL row mapping could not be verified.");
+        return new MavlResult { ByExcelRowNumber = values };
     }
 
     private string GetSessionFilterValueExpression(SessionFilterColumn column)

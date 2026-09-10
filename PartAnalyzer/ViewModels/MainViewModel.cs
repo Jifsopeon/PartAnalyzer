@@ -58,6 +58,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private DataRowView? _selectedGroupedPart;
     private DataLoadResult? _loadedDataset;
     private WorksheetProcessingSession? _processingSession;
+    private MavlResult? _mavlResult;
     private IReadOnlyList<ImportedColumnInfo> _importedColumns = Array.Empty<ImportedColumnInfo>();
     private IReadOnlyList<ImportedColumnInfo> _mappingColumns = Array.Empty<ImportedColumnInfo>();
     private IReadOnlyList<PartDetailColumn> _partDetailColumns = Array.Empty<PartDetailColumn>();
@@ -411,6 +412,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public WorksheetProcessingSession? ProcessingSession => _processingSession;
 
     public bool HasValidatedProcessingSession => _processingSession is not null;
+
+    public MavlResult? MavlResult => _mavlResult;
 
     public bool CanAnalyzeParts => !IsBusy
         && _loadedDataset is not null
@@ -894,6 +897,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(ProcessingSession));
             OnPropertyChanged(nameof(HasValidatedProcessingSession));
             _loadedDataset = await _duckDbDataService.LoadWorksheetAsync(_processingSession);
+            _mavlResult = await _duckDbDataService.CalculateMavlAsync();
+            OnPropertyChanged(nameof(MavlResult));
             ImportedColumns = _loadedDataset.Columns;
             MappingColumns = _loadedDataset.Columns;
             RestoreMappings();
@@ -1237,6 +1242,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _rawSort = null;
         _groupedSort = null;
         _duckDbDataService.ClearDataset();
+        _mavlResult = null;
+        OnPropertyChanged(nameof(MavlResult));
         ClearConstrainedFilterSessionState();
         _processingSession = null;
         OnPropertyChanged(nameof(ProcessingSession));
