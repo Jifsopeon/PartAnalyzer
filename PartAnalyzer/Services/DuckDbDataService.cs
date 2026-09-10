@@ -11,6 +11,8 @@ namespace PartAnalyzer.Services;
 public sealed class DuckDbDataService : IDisposable
 {
     private const string SourceTableName = "source_rows";
+    private const string PartNumberComparisonColumnName = "part_number_comparison_value";
+    private const string CategoryComparisonColumnName = "category_comparison_value";
     private const string ManufacturerComparisonColumnName = "manufacturer_comparison_value";
     private const string PartSummaryViewName = "part_summary";
     private const string PartMetadataTableName = "part_metadata";
@@ -484,10 +486,13 @@ public sealed class DuckDbDataService : IDisposable
     private string GetSessionFilterExpression(SessionFilterColumn column)
     {
         if (_currentDataset?.ProcessingSession is null) throw new DuckDbDataException("Load a validated worksheet before filtering.");
-        if (column == SessionFilterColumn.Manufacturer) return ManufacturerComparisonColumnName;
-        var logical = column == SessionFilterColumn.PartNumber ? RequiredWorksheetColumn.PartNumber : RequiredWorksheetColumn.Category;
-        var mapping = _currentDataset.ProcessingSession.GetRequiredColumn(logical);
-        return _currentDataset.Columns.Single(item => item.ExcelColumnNumber == mapping.ExcelColumnNumber).InternalColumnName;
+        return column switch
+        {
+            SessionFilterColumn.PartNumber => PartNumberComparisonColumnName,
+            SessionFilterColumn.Category => CategoryComparisonColumnName,
+            SessionFilterColumn.Manufacturer => ManufacturerComparisonColumnName,
+            _ => throw new DuckDbDataException("The selected filter column is not supported.")
+        };
     }
 
     private string GetSessionFilterValueExpression(SessionFilterColumn column)
@@ -917,6 +922,8 @@ public sealed class DuckDbDataService : IDisposable
                 _source_row_id BIGINT NOT NULL,
                 _excel_row_number INTEGER NOT NULL,
                 {columnSql},
+                {PartNumberComparisonColumnName} VARCHAR,
+                {CategoryComparisonColumnName} VARCHAR,
                 {ManufacturerComparisonColumnName} VARCHAR
             );
             """;
@@ -950,6 +957,8 @@ public sealed class DuckDbDataService : IDisposable
                     row.AppendValue(value);
                 }
 
+                row.AppendValue(sessionRow.PartNumberComparisonValue);
+                row.AppendValue(sessionRow.CategoryComparisonValue);
                 row.AppendValue(sessionRow.ManufacturerComparisonValue);
             });
         }

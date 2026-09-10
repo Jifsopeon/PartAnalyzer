@@ -106,9 +106,11 @@ public sealed class WorksheetProcessingSessionService
                 {
                     ExcelRowNumber = rowNumber,
                     PartNumberRawValue = partNumber,
+                    PartNumberComparisonValue = AnalyticalValueIdentity.Normalize(partNumber),
                     CategoryRawValue = category,
+                    CategoryComparisonValue = AnalyticalValueIdentity.Normalize(category),
                     ManufacturerRawValue = manufacturer,
-                    ManufacturerComparisonValue = manufacturer.Trim()
+                    ManufacturerComparisonValue = AnalyticalValueIdentity.Normalize(manufacturer)
                 });
             }
 
