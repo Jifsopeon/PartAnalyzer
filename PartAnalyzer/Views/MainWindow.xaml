@@ -55,8 +55,8 @@
                                 Padding="14,7"
                                 Margin="10,0,0,0"
                                 DockPanel.Dock="Left" />
-                        <CheckBox Content="Ignore hidden Excel rows"
-                                  IsChecked="{Binding IgnoreHiddenRows}"
+                        <CheckBox Content="Include hidden rows and columns"
+                                  IsChecked="{Binding IncludeHiddenRowsAndColumns}"
                                   VerticalAlignment="Center"
                                   Margin="18,0,0,0" />
                         <ProgressBar IsIndeterminate="{Binding IsBusy}"
@@ -190,6 +190,7 @@
                     <DataGrid x:Name="RawDataGrid"
                               Grid.Row="2"
                               ItemsSource="{Binding DataRowsView}"
+                              Sorting="RawDataGrid_Sorting"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               EnableRowVirtualization="True"
@@ -208,7 +209,13 @@
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
                             <Button Content="First" Command="{Binding FirstPageCommand}" IsEnabled="{Binding CanMovePreviousPage}" Padding="10,5" Margin="0,0,6,0" />
                             <Button Content="Previous" Command="{Binding PreviousPageCommand}" IsEnabled="{Binding CanMovePreviousPage}" Padding="10,5" Margin="0,0,12,0" />
-                            <TextBlock Text="{Binding PageNumberSummary}" VerticalAlignment="Center" Margin="0,0,12,0" />
+                            <TextBlock Text="Page" VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <ComboBox ItemsSource="{Binding RawPageNumbers}"
+                                      SelectedItem="{Binding SelectedRawPageNumber, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      Width="72"
+                                      MaxDropDownHeight="260"
+                                      Margin="0,0,6,0" />
+                            <TextBlock Text="{Binding TotalPages, StringFormat=of {0}}" VerticalAlignment="Center" Margin="0,0,12,0" />
                             <Button Content="Next" Command="{Binding NextPageCommand}" IsEnabled="{Binding CanMoveNextPage}" Padding="10,5" Margin="0,0,6,0" />
                             <Button Content="Last" Command="{Binding LastPageCommand}" IsEnabled="{Binding CanMoveNextPage}" Padding="10,5" />
                         </StackPanel>
@@ -260,11 +267,13 @@
 
                     <TextBlock Grid.Row="2" Text="Part Summaries" Style="{StaticResource SectionTitle}" Margin="0,8,0,8" />
 
-                    <DataGrid Grid.Row="3"
+                    <DataGrid x:Name="GroupedPartsGrid"
+                              Grid.Row="3"
                               ItemsSource="{Binding GroupedPartsRowsView}"
                               SelectedItem="{Binding SelectedGroupedPart}"
+                              Sorting="GroupedPartsGrid_Sorting"
                               AutoGenerateColumns="False"
-                              IsReadOnly="True"
+                              IsReadOnly="False"
                               EnableRowVirtualization="True"
                               EnableColumnVirtualization="True"
                               VirtualizingPanel.IsVirtualizing="True"
@@ -275,11 +284,15 @@
                               CanUserAddRows="False"
                               CanUserDeleteRows="False">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Part Identifier" Binding="{Binding PartIdentifier}" Width="220" />
-                            <DataGridTextColumn Header="Rows" Binding="{Binding PartRowCount}" Width="90" />
-                            <DataGridTextColumn Header="Manufacturers" Binding="{Binding ManufacturerCount}" Width="130" />
-                            <DataGridTextColumn Header="Duplicate?" Binding="{Binding IsDuplicatePart}" Width="110" />
-                            <DataGridTextColumn Header="Multiple Manufacturer?" Binding="{Binding HasMultipleManufacturers}" Width="170" />
+                            <DataGridTextColumn Header="Part Identifier" Binding="{Binding PartIdentifier}" Width="220" IsReadOnly="True" SortMemberPath="PartIdentifier" />
+                            <DataGridTextColumn Header="Rows" Binding="{Binding PartRowCount}" Width="90" IsReadOnly="True" SortMemberPath="PartRowCount" />
+                            <DataGridTextColumn Header="Manufacturers" Binding="{Binding ManufacturerCount}" Width="130" IsReadOnly="True" SortMemberPath="ManufacturerCount" />
+                            <DataGridTextColumn Header="Duplicate?" Binding="{Binding IsDuplicatePart}" Width="110" IsReadOnly="True" SortMemberPath="IsDuplicatePart" />
+                            <DataGridTextColumn Header="Multiple Manufacturer?" Binding="{Binding HasMultipleManufacturers}" Width="170" IsReadOnly="True" SortMemberPath="HasMultipleManufacturers" />
+                            <DataGridCheckBoxColumn Header="Reviewed"
+                                                    Binding="{Binding Reviewed, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                    SortMemberPath="Reviewed"
+                                                    Width="100" />
                         </DataGrid.Columns>
                     </DataGrid>
 
@@ -288,7 +301,13 @@
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
                             <Button Content="First" Command="{Binding FirstGroupedPageCommand}" IsEnabled="{Binding CanMovePreviousGroupedPage}" Padding="10,5" Margin="0,0,6,0" />
                             <Button Content="Previous" Command="{Binding PreviousGroupedPageCommand}" IsEnabled="{Binding CanMovePreviousGroupedPage}" Padding="10,5" Margin="0,0,12,0" />
-                            <TextBlock Text="{Binding GroupedPageNumberSummary}" VerticalAlignment="Center" Margin="0,0,12,0" />
+                            <TextBlock Text="Page" VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <ComboBox ItemsSource="{Binding GroupedPageNumbers}"
+                                      SelectedItem="{Binding SelectedGroupedPageNumber, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      Width="72"
+                                      MaxDropDownHeight="260"
+                                      Margin="0,0,6,0" />
+                            <TextBlock Text="{Binding GroupedTotalPages, StringFormat=of {0}}" VerticalAlignment="Center" Margin="0,0,12,0" />
                             <Button Content="Next" Command="{Binding NextGroupedPageCommand}" IsEnabled="{Binding CanMoveNextGroupedPage}" Padding="10,5" Margin="0,0,6,0" />
                             <Button Content="Last" Command="{Binding LastGroupedPageCommand}" IsEnabled="{Binding CanMoveNextGroupedPage}" Padding="10,5" />
                         </StackPanel>
@@ -319,8 +338,8 @@
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <StackPanel MaxWidth="720" HorizontalAlignment="Left">
                             <TextBlock Text="Settings" Style="{StaticResource SectionTitle}" />
-                            <CheckBox Content="Ignore hidden Excel rows"
-                                      IsChecked="{Binding IgnoreHiddenRows}"
+                            <CheckBox Content="Include hidden rows and columns"
+                                      IsChecked="{Binding IncludeHiddenRowsAndColumns}"
                                       Margin="0,0,0,14" />
                             <TextBlock Text="Last Import Directory" Style="{StaticResource LabelText}" />
                             <TextBlock Text="{Binding LastImportDirectory, TargetNullValue=-}" TextWrapping="Wrap" Margin="0,0,0,14" />
@@ -360,14 +379,46 @@
                 </Border>
             </TabItem>
 
-            <TabItem Header="Export" IsEnabled="False">
-                <Grid Background="White" Margin="12">
-                    <TextBlock Text="Export is not available in Phase 1."
-                               HorizontalAlignment="Center"
-                               VerticalAlignment="Center"
-                               FontSize="16"
-                               Foreground="#555555" />
-                </Grid>
+            <TabItem Header="Export">
+                <Border Background="White" BorderBrush="#DADDE1" BorderThickness="1" Padding="18" Margin="12">
+                    <StackPanel MaxWidth="760" HorizontalAlignment="Left">
+                        <TextBlock Text="Export" Style="{StaticResource SectionTitle}" />
+                        <TextBlock Text="{Binding DirtyStateSummary}"
+                                   Foreground="#555555"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,14" />
+
+                        <TextBlock Text="Export mode" Style="{StaticResource LabelText}" />
+                        <ListBox ItemsSource="{Binding ExportModes}"
+                                 SelectedItem="{Binding SelectedExportModeOption}"
+                                 BorderBrush="#DADDE1"
+                                 BorderThickness="1"
+                                 Padding="4"
+                                 Margin="0,0,0,16"
+                                 MinWidth="420">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="4">
+                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                                        <TextBlock Text="{Binding Description}"
+                                                   Foreground="#555555"
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <Button Content="Export Excel File"
+                                Command="{Binding ExportWorkbookCommand}"
+                                IsEnabled="{Binding CanExport}"
+                                Padding="14,7"
+                                HorizontalAlignment="Left" />
+                        <TextBlock Text="Exports are written to a new .xlsx workbook. The imported source workbook is never overwritten."
+                                   Foreground="#555555"
+                                   TextWrapping="Wrap"
+                                   Margin="0,14,0,0" />
+                    </StackPanel>
+                </Border>
             </TabItem>
         </TabControl>
     </DockPanel>

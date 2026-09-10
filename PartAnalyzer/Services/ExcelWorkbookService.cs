@@ -8,23 +8,23 @@ public sealed class ExcelWorkbookService
 {
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".xlsx",
-        ".xlsm"
+        ".xlsx"
     };
 
     public Task<WorkbookInfo> InspectWorkbookAsync(
         string filePath,
-        bool ignoreHiddenRows,
+        bool includeHiddenRowsAndColumns,
         CancellationToken cancellationToken = default)
     {
-        return Task.Run(() => InspectWorkbook(filePath, ignoreHiddenRows, cancellationToken), cancellationToken);
+        return Task.Run(() => InspectWorkbook(filePath, includeHiddenRowsAndColumns, cancellationToken), cancellationToken);
     }
 
     private static WorkbookInfo InspectWorkbook(
         string filePath,
-        bool ignoreHiddenRows,
+        bool includeHiddenRowsAndColumns,
         CancellationToken cancellationToken)
     {
+        using var measurement = PerformanceLogger.Measure("Workbook inspection", Path.GetFileName(filePath));
         if (string.IsNullOrWhiteSpace(filePath))
         {
             throw new WorkbookInspectionException("Choose an Excel workbook to inspect.");
@@ -38,7 +38,7 @@ public sealed class ExcelWorkbookService
         var extension = Path.GetExtension(filePath);
         if (!SupportedExtensions.Contains(extension))
         {
-            throw new WorkbookInspectionException("Choose an .xlsx or .xlsm workbook.");
+            throw new WorkbookInspectionException("Choose an .xlsx workbook.");
         }
 
         try
@@ -54,7 +54,7 @@ public sealed class ExcelWorkbookService
             foreach (var worksheet in workbook.Worksheets)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                result.Worksheets.Add(InspectWorksheet(worksheet, ignoreHiddenRows));
+                result.Worksheets.Add(InspectWorksheet(worksheet, includeHiddenRowsAndColumns));
             }
 
             if (result.Worksheets.Count == 0)
@@ -91,7 +91,7 @@ public sealed class ExcelWorkbookService
         }
     }
 
-    private static WorksheetInfo InspectWorksheet(IXLWorksheet worksheet, bool ignoreHiddenRows)
+    private static WorksheetInfo InspectWorksheet(IXLWorksheet worksheet, bool includeHiddenRowsAndColumns)
     {
         var range = worksheet.RangeUsed();
         var visibility = worksheet.Visibility.ToString();
@@ -137,7 +137,7 @@ public sealed class ExcelWorkbookService
                 hiddenDataRowCount++;
             }
 
-            if (!ignoreHiddenRows || !isRowHidden)
+            if (includeHiddenRowsAndColumns || !isRowHidden)
             {
                 eligibleDataRowCount++;
             }
@@ -164,7 +164,7 @@ public sealed class ExcelWorkbookService
                     ColumnIndex = columnNumber,
                     ColumnLetter = XLHelper.GetColumnLetterFromNumber(columnNumber),
                     InternalColumnName = $"col_{displayOrder:000}",
-                    Name = cell.GetFormattedString().Trim()
+                    Name = cell.GetFormattedString()
                 });
             }
         }

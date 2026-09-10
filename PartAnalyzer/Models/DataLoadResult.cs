@@ -15,4 +15,6 @@ public sealed class DataLoadResult
     public int SkippedBlankRowCount { get; init; }
 
     public IReadOnlyList<ImportedColumnInfo> Columns { get; init; } = Array.Empty<ImportedColumnInfo>();
+
+    public WorksheetProcessingSession? ProcessingSession { get; init; }
 }

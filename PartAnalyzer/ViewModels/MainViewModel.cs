@@ -15,6 +15,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private const int DefaultPageSize = 200;
     private readonly SettingsService _settingsService;
     private readonly ExcelWorkbookService _excelWorkbookService;
+    private readonly WorksheetProcessingSessionService _worksheetProcessingSessionService;
     private readonly FileDialogService _fileDialogService;
     private readonly DuckDbDataService _duckDbDataService;
     private readonly AppSettings _settings;
@@ -29,8 +30,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly AsyncRelayCommand _previousGroupedPageCommand;
     private readonly AsyncRelayCommand _nextGroupedPageCommand;
     private readonly AsyncRelayCommand _lastGroupedPageCommand;
+    private readonly AsyncRelayCommand _exportWorkbookCommand;
     private readonly AsyncRelayCommand _addFilterCommand;
     private readonly AsyncRelayCommand _clearAllFiltersCommand;
+    private readonly AsyncRelayCommand _removeAllFiltersCommand;
     private readonly RelayCommand _clearSelectedFilterCommand;
     private readonly RelayCommand _removeSelectedFilterCommand;
     private readonly DispatcherTimer _filterRefreshTimer;
@@ -41,6 +44,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _isInspecting;
     private bool _isLoadingData;
     private bool _isAnalyzingParts;
+    private bool _isExporting;
+    private bool _isFiltering;
+    private bool _hasUnexportedChanges;
     private string _statusMessage = "Ready.";
     private string _dataStateMessage = "No workbook selected.";
     private string _groupedPartsStateMessage = "Load worksheet data before analyzing parts.";
@@ -51,6 +57,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private DataView? _partDetailRowsView;
     private DataRowView? _selectedGroupedPart;
     private DataLoadResult? _loadedDataset;
+    private WorksheetProcessingSession? _processingSession;
     private IReadOnlyList<ImportedColumnInfo> _importedColumns = Array.Empty<ImportedColumnInfo>();
     private IReadOnlyList<ImportedColumnInfo> _mappingColumns = Array.Empty<ImportedColumnInfo>();
     private IReadOnlyList<PartDetailColumn> _partDetailColumns = Array.Empty<PartDetailColumn>();
@@ -58,15 +65,26 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private ImportedColumnInfo? _selectedManufacturerColumn;
     private ImportedColumnInfo? _selectedManufacturerPartNumberColumn;
     private PartAnalysisResult? _partAnalysisResult;
+    private ExportModeOption? _selectedExportModeOption;
     private FilterDefinition? _selectedAvailableFilter;
     private ActiveFilterViewModel? _selectedActiveFilter;
+    private QuerySort? _rawSort;
+    private QuerySort? _groupedSort;
     private int _filterRefreshVersion;
+    private int _rawPageRequestVersion;
+    private int _groupedPageRequestVersion;
+    private int _partDetailRequestVersion;
+    private int _constrainedFilterRequestVersion;
+    private string? _presetName;
+    private IReadOnlyList<UnavailableFilterSelection> _unavailableSelections = Array.Empty<UnavailableFilterSelection>();
     private int _currentPageNumber = 1;
+    private int _selectedRawPageNumber = 1;
     private int _totalPages = 1;
     private long _totalImportedRows;
     private long _firstDisplayRow;
     private long _lastDisplayRow;
     private int _groupedPageNumber = 1;
+    private int _selectedGroupedPageNumber = 1;
     private int _groupedTotalPages = 1;
     private long _totalGroupedRows;
     private long _firstGroupedDisplayRow;
@@ -75,11 +93,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public MainViewModel(
         SettingsService settingsService,
         ExcelWorkbookService excelWorkbookService,
+        WorksheetProcessingSessionService worksheetProcessingSessionService,
         FileDialogService fileDialogService,
         DuckDbDataService duckDbDataService)
     {
         _settingsService = settingsService;
         _excelWorkbookService = excelWorkbookService;
+        _worksheetProcessingSessionService = worksheetProcessingSessionService;
         _fileDialogService = fileDialogService;
         _duckDbDataService = duckDbDataService;
         _settings = _settingsService.Load();
@@ -94,8 +114,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _previousGroupedPageCommand = new AsyncRelayCommand(() => LoadGroupedPageAsync(GroupedPageNumber - 1), () => CanMovePreviousGroupedPage);
         _nextGroupedPageCommand = new AsyncRelayCommand(() => LoadGroupedPageAsync(GroupedPageNumber + 1), () => CanMoveNextGroupedPage);
         _lastGroupedPageCommand = new AsyncRelayCommand(() => LoadGroupedPageAsync(GroupedTotalPages), () => CanMoveNextGroupedPage);
+        _exportWorkbookCommand = new AsyncRelayCommand(ExportWorkbookAsync, () => CanExport);
         _addFilterCommand = new AsyncRelayCommand(AddSelectedFilterAsync, () => CanAddFilter);
         _clearAllFiltersCommand = new AsyncRelayCommand(ClearAllFiltersAsync, () => ActiveFilters.Count > 0);
+        _removeAllFiltersCommand = new AsyncRelayCommand(RemoveAllFiltersAsync, () => ActiveFilters.Count > 0);
         _clearSelectedFilterCommand = new RelayCommand(ClearSelectedFilter, () => SelectedActiveFilter is not null);
         _removeSelectedFilterCommand = new RelayCommand(RemoveSelectedFilter, () => SelectedActiveFilter is not null);
         _filterRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
@@ -103,6 +125,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _filterValueSearchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
         _filterValueSearchTimer.Tick += async (_, _) => await RefreshSelectedFilterValuesFromTimerAsync();
         ActiveFilters.CollectionChanged += ActiveFiltersCollectionChanged;
+        RebuildPageNumbers(RawPageNumbers, 1);
+        RebuildPageNumbers(GroupedPageNumbers, 1);
+        SelectedExportModeOption = ExportModes[0];
+        foreach (var filter in ConstrainedFilters) filter.PropertyChanged += ConstrainedFilterPropertyChanged;
+        RefreshPresetNames();
     }
 
     public ObservableCollection<WorksheetInfo> Worksheets { get; } = new();
@@ -129,9 +156,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public AsyncRelayCommand LastGroupedPageCommand => _lastGroupedPageCommand;
 
+    public AsyncRelayCommand ExportWorkbookCommand => _exportWorkbookCommand;
+
     public AsyncRelayCommand AddFilterCommand => _addFilterCommand;
 
     public AsyncRelayCommand ClearAllFiltersCommand => _clearAllFiltersCommand;
+
+    public AsyncRelayCommand RemoveAllFiltersCommand => _removeAllFiltersCommand;
 
     public RelayCommand ClearSelectedFilterCommand => _clearSelectedFilterCommand;
 
@@ -140,6 +171,36 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public ObservableCollection<FilterDefinition> AvailableFilters { get; } = new();
 
     public ObservableCollection<ActiveFilterViewModel> ActiveFilters { get; } = new();
+
+    public ObservableCollection<ConstrainedFilterViewModel> ConstrainedFilters { get; } = new()
+    {
+        new(SessionFilterColumn.PartNumber, "P+F part number"),
+        new(SessionFilterColumn.Category, "Category"),
+        new(SessionFilterColumn.Manufacturer, "Manufacturer")
+    };
+
+    public ObservableCollection<FilterValueOption> ManufacturerPreview { get; } = new();
+
+    public ObservableCollection<string> PresetNames { get; } = new();
+
+    public string? PresetName { get => _presetName; set => SetProperty(ref _presetName, value); }
+
+    public bool HasUnavailableSelectedValues => _unavailableSelections.Count > 0;
+
+    public IReadOnlyList<UnavailableFilterSelection> UnavailableSelections => _unavailableSelections;
+
+    public ObservableCollection<int> RawPageNumbers { get; } = new();
+
+    public ObservableCollection<int> GroupedPageNumbers { get; } = new();
+
+    public IReadOnlyList<ExportModeOption> ExportModes { get; } = new[]
+    {
+        new ExportModeOption { Mode = ExportMode.ProcessedWorkbook, DisplayName = "Processed Workbook", Description = "Processed Data and Part Summary sheets." },
+        new ExportModeOption { Mode = ExportMode.AllSourceRows, DisplayName = "All Source Rows", Description = "All loaded rows with generated fields appended." },
+        new ExportModeOption { Mode = ExportMode.CurrentFilteredRows, DisplayName = "Current Filtered Rows", Description = "All source rows matching the current filters." },
+        new ExportModeOption { Mode = ExportMode.GroupedPartSummary, DisplayName = "Grouped Part Summary", Description = "One row per analyzed part." },
+        new ExportModeOption { Mode = ExportMode.CurrentFilteredGroupedParts, DisplayName = "Current Filtered Grouped Parts", Description = "All grouped parts matching the current filters." }
+    };
 
     public WorkbookInfo? CurrentWorkbook
     {
@@ -160,6 +221,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         get => _selectedWorksheet;
         set
         {
+            if (!Equals(_selectedWorksheet, value) && HasUnexportedChanges && !ConfirmDiscardUnsavedChanges())
+            {
+                OnPropertyChanged();
+                return;
+            }
+
             if (!SetProperty(ref _selectedWorksheet, value))
             {
                 return;
@@ -177,17 +244,23 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    public bool IgnoreHiddenRows
+    public bool IncludeHiddenRowsAndColumns
     {
-        get => _settings.IgnoreHiddenRows;
+        get => _settings.IncludeHiddenRowsAndColumns;
         set
         {
-            if (_settings.IgnoreHiddenRows == value)
+            if (_settings.IncludeHiddenRowsAndColumns == value)
             {
                 return;
             }
 
-            _settings.IgnoreHiddenRows = value;
+            if (HasUnexportedChanges && !ConfirmDiscardUnsavedChanges())
+            {
+                OnPropertyChanged();
+                return;
+            }
+
+            _settings.IncludeHiddenRowsAndColumns = value;
             ClearLoadedData(SelectedWorksheet is null
                 ? "No workbook selected."
                 : "Import settings changed. Reload data to apply.");
@@ -241,6 +314,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(CanStartInspection));
             OnPropertyChanged(nameof(CanLoadData));
             OnPropertyChanged(nameof(CanAnalyzeParts));
+            OnPropertyChanged(nameof(CanExport));
             OnPropertyChanged(nameof(IsBusy));
             RaiseCommandStates();
         }
@@ -259,6 +333,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(IsBusy));
             OnPropertyChanged(nameof(CanLoadData));
             OnPropertyChanged(nameof(CanAnalyzeParts));
+            OnPropertyChanged(nameof(CanExport));
             RaiseCommandStates();
         }
     }
@@ -275,21 +350,93 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             OnPropertyChanged(nameof(IsBusy));
             OnPropertyChanged(nameof(CanAnalyzeParts));
+            OnPropertyChanged(nameof(CanExport));
             RaiseCommandStates();
         }
     }
 
-    public bool IsBusy => IsInspecting || IsLoadingData || IsAnalyzingParts;
+    public bool IsExporting
+    {
+        get => _isExporting;
+        private set
+        {
+            if (!SetProperty(ref _isExporting, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsBusy));
+            OnPropertyChanged(nameof(CanExport));
+            RaiseCommandStates();
+        }
+    }
+
+    public bool IsFiltering
+    {
+        get => _isFiltering;
+        private set
+        {
+            if (!SetProperty(ref _isFiltering, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsBusy));
+            RaiseCommandStates();
+        }
+    }
+
+    public bool HasUnexportedChanges
+    {
+        get => _hasUnexportedChanges;
+        private set
+        {
+            if (SetProperty(ref _hasUnexportedChanges, value))
+            {
+                OnPropertyChanged(nameof(DirtyStateSummary));
+            }
+        }
+    }
+
+    public string DirtyStateSummary => HasUnexportedChanges
+        ? "Reviewed changes have not been exported."
+        : "No unexported Reviewed changes.";
+
+    public bool IsBusy => IsInspecting || IsLoadingData || IsAnalyzingParts || IsExporting || IsFiltering;
 
     public bool CanStartInspection => !IsBusy;
 
     public bool CanLoadData => !IsBusy && CurrentWorkbook is not null && SelectedWorksheet is not null && !SelectedWorksheet.IsHidden && SelectedWorksheet.Headers.Count > 0;
+
+    public WorksheetProcessingSession? ProcessingSession => _processingSession;
+
+    public bool HasValidatedProcessingSession => _processingSession is not null;
 
     public bool CanAnalyzeParts => !IsBusy
         && _loadedDataset is not null
         && SelectedPrimaryPartColumn is not null
         && SelectedManufacturerColumn is not null
         && SelectedPrimaryPartColumn.InternalColumnName != SelectedManufacturerColumn.InternalColumnName;
+
+    public bool CanExport => !IsBusy
+        && _loadedDataset is not null
+        && SelectedExportModeOption is not null
+        && (SelectedExportModeOption.Mode is ExportMode.ProcessedWorkbook or ExportMode.GroupedPartSummary or ExportMode.CurrentFilteredGroupedParts
+            ? _partAnalysisResult is not null
+            : true);
+
+    public ExportModeOption? SelectedExportModeOption
+    {
+        get => _selectedExportModeOption;
+        set
+        {
+            if (SetProperty(ref _selectedExportModeOption, value))
+            {
+                OnPropertyChanged(nameof(CanExport));
+                _exportWorkbookCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
 
     public bool CanAddFilter => SelectedAvailableFilter is not null
         && ActiveFilters.All(filter => filter.Definition.Id != SelectedAvailableFilter.Id);
@@ -444,7 +591,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public DataView? GroupedPartsRowsView
     {
         get => _groupedPartsRowsView;
-        private set => SetProperty(ref _groupedPartsRowsView, value);
+        private set
+        {
+            if (_groupedPartsRowsView?.Table is not null)
+            {
+                _groupedPartsRowsView.Table.ColumnChanged -= GroupedPartsColumnChanged;
+            }
+
+            if (SetProperty(ref _groupedPartsRowsView, value) && _groupedPartsRowsView?.Table is not null)
+            {
+                _groupedPartsRowsView.Table.ColumnChanged += GroupedPartsColumnChanged;
+            }
+        }
     }
 
     public DataView? PartDetailRowsView
@@ -480,6 +638,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _currentPageNumber, value))
             {
+                SetSelectedRawPageNumber(value);
                 OnPropertyChanged(nameof(PageNumberSummary));
                 OnPropertyChanged(nameof(CanMovePreviousPage));
                 OnPropertyChanged(nameof(CanMoveNextPage));
@@ -494,9 +653,33 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _totalPages, value))
             {
+                RebuildPageNumbers(RawPageNumbers, value);
+                if (SelectedRawPageNumber > value)
+                {
+                    SetSelectedRawPageNumber(value);
+                }
+
                 OnPropertyChanged(nameof(PageNumberSummary));
                 OnPropertyChanged(nameof(CanMovePreviousPage));
                 OnPropertyChanged(nameof(CanMoveNextPage));
+            }
+        }
+    }
+
+    public int SelectedRawPageNumber
+    {
+        get => _selectedRawPageNumber;
+        set
+        {
+            var safeValue = Math.Clamp(value, 1, Math.Max(1, TotalPages));
+            if (!SetProperty(ref _selectedRawPageNumber, safeValue))
+            {
+                return;
+            }
+
+            if (_loadedDataset is not null && safeValue != CurrentPageNumber)
+            {
+                _ = LoadPageAsync(safeValue);
             }
         }
     }
@@ -529,6 +712,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _groupedPageNumber, value))
             {
+                SetSelectedGroupedPageNumber(value);
                 OnPropertyChanged(nameof(GroupedPageNumberSummary));
                 OnPropertyChanged(nameof(CanMovePreviousGroupedPage));
                 OnPropertyChanged(nameof(CanMoveNextGroupedPage));
@@ -543,9 +727,33 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _groupedTotalPages, value))
             {
+                RebuildPageNumbers(GroupedPageNumbers, value);
+                if (SelectedGroupedPageNumber > value)
+                {
+                    SetSelectedGroupedPageNumber(value);
+                }
+
                 OnPropertyChanged(nameof(GroupedPageNumberSummary));
                 OnPropertyChanged(nameof(CanMovePreviousGroupedPage));
                 OnPropertyChanged(nameof(CanMoveNextGroupedPage));
+            }
+        }
+    }
+
+    public int SelectedGroupedPageNumber
+    {
+        get => _selectedGroupedPageNumber;
+        set
+        {
+            var safeValue = Math.Clamp(value, 1, Math.Max(1, GroupedTotalPages));
+            if (!SetProperty(ref _selectedGroupedPageNumber, safeValue))
+            {
+                return;
+            }
+
+            if (_partAnalysisResult is not null && safeValue != GroupedPageNumber)
+            {
+                _ = LoadGroupedPageAsync(safeValue);
             }
         }
     }
@@ -577,14 +785,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (SelectedWorksheet is null)
             {
-                return IgnoreHiddenRows
-                    ? "Hidden rows will be excluded from future imports."
-                    : "Hidden rows will be included in future imports.";
+                return IncludeHiddenRowsAndColumns
+                    ? "Hidden rows and columns will be included in future processing."
+                    : "Hidden rows and columns will be excluded from future processing.";
             }
 
-            return IgnoreHiddenRows
-                ? $"{SelectedWorksheetEligibleRowCount} of {SelectedWorksheet.TotalDataRowCount} data rows are currently eligible for import."
-                : $"All {SelectedWorksheet.TotalDataRowCount} data rows are currently eligible for import.";
+            return IncludeHiddenRowsAndColumns
+                ? $"All {SelectedWorksheet.TotalDataRowCount} data rows are currently eligible for processing."
+                : $"{SelectedWorksheetEligibleRowCount} of {SelectedWorksheet.TotalDataRowCount} data rows are currently eligible before blank-row validation.";
         }
     }
 
@@ -597,14 +805,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 return null;
             }
 
-            return IgnoreHiddenRows
-                ? SelectedWorksheet.TotalDataRowCount - SelectedWorksheet.HiddenDataRowCount
-                : SelectedWorksheet.TotalDataRowCount;
+            return IncludeHiddenRowsAndColumns
+                ? SelectedWorksheet.TotalDataRowCount
+                : SelectedWorksheet.TotalDataRowCount - SelectedWorksheet.HiddenDataRowCount;
         }
     }
 
     private async Task ImportWorkbookAsync()
     {
+        if (HasUnexportedChanges && !ConfirmDiscardUnsavedChanges())
+        {
+            StatusMessage = "Import cancelled.";
+            return;
+        }
+
         var filePath = _fileDialogService.SelectExcelWorkbook(LastImportDirectory);
         if (filePath is null)
         {
@@ -621,7 +835,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         try
         {
-            var workbook = await _excelWorkbookService.InspectWorkbookAsync(filePath, IgnoreHiddenRows);
+            var workbook = await _excelWorkbookService.InspectWorkbookAsync(filePath, IncludeHiddenRowsAndColumns);
             CurrentWorkbook = workbook;
             Worksheets.Clear();
 
@@ -660,6 +874,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        if (HasUnexportedChanges && !ConfirmDiscardUnsavedChanges())
+        {
+            StatusMessage = "Data load cancelled.";
+            return;
+        }
+
         IsLoadingData = true;
         DataRowsView = null;
         DataStateMessage = "Loading worksheet data...";
@@ -667,29 +887,35 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         try
         {
-            _loadedDataset = await _duckDbDataService.LoadWorksheetAsync(
+            _processingSession = await _worksheetProcessingSessionService.CreateAsync(
                 CurrentWorkbook.FullPath,
                 SelectedWorksheet,
-                IgnoreHiddenRows);
+                IncludeHiddenRowsAndColumns);
+            OnPropertyChanged(nameof(ProcessingSession));
+            OnPropertyChanged(nameof(HasValidatedProcessingSession));
+            _loadedDataset = await _duckDbDataService.LoadWorksheetAsync(_processingSession);
             ImportedColumns = _loadedDataset.Columns;
             MappingColumns = _loadedDataset.Columns;
             RestoreMappings();
-            await RefreshFilterDefinitionsAsync();
+            await InitializeConstrainedFiltersAsync();
 
             await LoadPageAsync(1);
             SelectedTabIndex = 1;
-            DataStateMessage = $"Loaded {_loadedDataset.ImportedRowCount} rows and {_loadedDataset.ImportedColumnCount} columns.";
-            var skippedSuffix = _loadedDataset.SkippedBlankRowCount == 0
-                ? string.Empty
-                : $" Skipped {_loadedDataset.SkippedBlankRowCount} blank rows.";
-            var expectedRows = SelectedWorksheetEligibleRowCount ?? 0;
-            var countSuffix = _loadedDataset.ImportedRowCount + _loadedDataset.SkippedBlankRowCount == expectedRows
-                ? string.Empty
-                : $" Expected {expectedRows} eligible data rows before blank-row skipping.";
-            StatusMessage = $"Loaded {_loadedDataset.ImportedRowCount} rows and {_loadedDataset.ImportedColumnCount} columns.{skippedSuffix}{countSuffix}";
+            DataStateMessage = $"Validated and loaded {_loadedDataset.ImportedRowCount} eligible rows and {_loadedDataset.ImportedColumnCount} effective columns.";
+            StatusMessage = $"Validated {SelectedWorksheet.Name}. {_loadedDataset.ImportedRowCount} eligible rows and {_loadedDataset.ImportedColumnCount} effective columns are available for later processing.";
         }
         catch (DuckDbDataException ex)
         {
+            _loadedDataset = null;
+            DataRowsView = null;
+            DataStateMessage = ex.Message;
+            StatusMessage = ex.Message;
+        }
+        catch (WorksheetValidationException ex)
+        {
+            _processingSession = null;
+            OnPropertyChanged(nameof(ProcessingSession));
+            OnPropertyChanged(nameof(HasValidatedProcessingSession));
             _loadedDataset = null;
             DataRowsView = null;
             DataStateMessage = ex.Message;
@@ -762,6 +988,66 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    private async Task ExportWorkbookAsync()
+    {
+        if (_loadedDataset is null || SelectedExportModeOption is null)
+        {
+            StatusMessage = "Load data before exporting.";
+            return;
+        }
+
+        if (!CanExport)
+        {
+            StatusMessage = "Run part analysis before exporting this mode.";
+            return;
+        }
+
+        var destinationPath = _fileDialogService.SelectExportWorkbook(
+            CreateSuggestedExportFileName(_loadedDataset.WorkbookPath),
+            Path.GetDirectoryName(_loadedDataset.WorkbookPath));
+        if (destinationPath is null)
+        {
+            StatusMessage = "Export cancelled.";
+            return;
+        }
+
+        if (PathsReferToSameFile(destinationPath, _loadedDataset.WorkbookPath))
+        {
+            StatusMessage = "The source workbook cannot be overwritten. Choose a different export filename.";
+            return;
+        }
+
+        IsExporting = true;
+        StatusMessage = "Exporting...";
+        try
+        {
+            var result = await _duckDbDataService.ExportWorkbookAsync(new ExportRequest
+            {
+                Mode = SelectedExportModeOption.Mode,
+                DestinationPath = destinationPath,
+                Filters = GetActiveCriteria()
+            });
+
+            HasUnexportedChanges = false;
+            var rowSummary = result.GroupedRowCount > 0 && result.SourceRowCount > 0
+                ? $"{result.SourceRowCount} source rows and {result.GroupedRowCount} grouped rows"
+                : $"{result.TotalRowCount} rows";
+            StatusMessage = $"Export complete. {rowSummary} written to: {result.DestinationPath}";
+        }
+        catch (DuckDbDataException ex)
+        {
+            StatusMessage = ex.Message;
+        }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = "Export cancelled.";
+        }
+        finally
+        {
+            IsExporting = false;
+        }
+    }
+
     private async Task LoadGroupedPageAsync(int pageNumber)
     {
         if (_partAnalysisResult is null)
@@ -769,7 +1055,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var page = await _duckDbDataService.GetPartSummaryPageAsync(pageNumber, DefaultPageSize, GetActiveCriteria());
+        var requestVersion = ++_groupedPageRequestVersion;
+        var page = await _duckDbDataService.GetPartSummaryPageAsync(pageNumber, DefaultPageSize, GetActiveCriteria(), _groupedSort);
+        if (requestVersion != _groupedPageRequestVersion)
+        {
+            return;
+        }
+
         SelectedGroupedPart = null;
         PartDetailRowsView = null;
         GroupedPartsRowsView = page.Rows.DefaultView;
@@ -784,6 +1076,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task LoadSelectedPartDetailsAsync()
     {
+        var requestVersion = ++_partDetailRequestVersion;
         if (SelectedGroupedPart is null)
         {
             PartDetailRowsView = null;
@@ -800,12 +1093,45 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             }
 
             var table = await _duckDbDataService.GetPartDetailRowsAsync(partIdentifier);
+            if (requestVersion != _partDetailRequestVersion)
+            {
+                return;
+            }
+
             PartDetailRowsView = table.DefaultView;
         }
         catch (DuckDbDataException ex)
         {
             StatusMessage = ex.Message;
             PartDetailRowsView = null;
+        }
+    }
+
+    private async void GroupedPartsColumnChanged(object sender, DataColumnChangeEventArgs e)
+    {
+        if (e.Column?.ColumnName != "Reviewed")
+        {
+            return;
+        }
+
+        var partIdentifier = Convert.ToString(e.Row["PartIdentifier"]);
+        if (string.IsNullOrWhiteSpace(partIdentifier))
+        {
+            return;
+        }
+
+        try
+        {
+            var reviewed = e.ProposedValue is not DBNull && Convert.ToBoolean(e.ProposedValue);
+            await _duckDbDataService.SetPartReviewedAsync(partIdentifier, reviewed);
+            HasUnexportedChanges = true;
+            StatusMessage = reviewed
+                ? $"Marked {partIdentifier} reviewed."
+                : $"Marked {partIdentifier} not reviewed.";
+        }
+        catch (DuckDbDataException ex)
+        {
+            StatusMessage = ex.Message;
         }
     }
 
@@ -816,7 +1142,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var page = await _duckDbDataService.GetPageAsync(pageNumber, DefaultPageSize, GetActiveCriteria());
+        var requestVersion = ++_rawPageRequestVersion;
+        var page = await _duckDbDataService.GetPageAsync(pageNumber, DefaultPageSize, GetActiveCriteria(), _rawSort);
+        if (requestVersion != _rawPageRequestVersion)
+        {
+            return;
+        }
+
         DataRowsView = page.Rows.DefaultView;
         _totalImportedRows = page.TotalRows;
         _firstDisplayRow = page.FirstDisplayRow;
@@ -868,9 +1200,47 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    public bool ConfirmCloseWithUnsavedChanges()
+    {
+        return !HasUnexportedChanges || ConfirmDiscardUnsavedChanges("You have changes that have not been exported. Exit and discard them?");
+    }
+
+    private bool ConfirmDiscardUnsavedChanges()
+    {
+        return ConfirmDiscardUnsavedChanges("The current dataset contains changes that have not been exported. Continue and discard them?");
+    }
+
+    private bool ConfirmDiscardUnsavedChanges(string message)
+    {
+        return _fileDialogService.ConfirmDiscardUnsavedChanges(message);
+    }
+
+    private static string CreateSuggestedExportFileName(string sourcePath)
+    {
+        var name = Path.GetFileNameWithoutExtension(sourcePath);
+        return $"{name}_Processed.xlsx";
+    }
+
+    private static bool PathsReferToSameFile(string firstPath, string secondPath)
+    {
+        return string.Equals(
+            Path.GetFullPath(firstPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            Path.GetFullPath(secondPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     private void ClearLoadedData(string message)
     {
+        _rawPageRequestVersion++;
+        _groupedPageRequestVersion++;
+        _partDetailRequestVersion++;
+        _rawSort = null;
+        _groupedSort = null;
         _duckDbDataService.ClearDataset();
+        ClearConstrainedFilterSessionState();
+        _processingSession = null;
+        OnPropertyChanged(nameof(ProcessingSession));
+        OnPropertyChanged(nameof(HasValidatedProcessingSession));
         _loadedDataset = null;
         ImportedColumns = Array.Empty<ImportedColumnInfo>();
         ClearFilters(clearDefinitions: true);
@@ -881,6 +1251,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _lastDisplayRow = 0;
         CurrentPageNumber = 1;
         TotalPages = 1;
+        SetSelectedRawPageNumber(1);
+        RebuildPageNumbers(RawPageNumbers, 1);
+        HasUnexportedChanges = false;
         DataStateMessage = message;
         OnPropertyChanged(nameof(PageSummary));
         RaiseCommandStates();
@@ -891,6 +1264,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(CanStartInspection));
         OnPropertyChanged(nameof(CanLoadData));
         OnPropertyChanged(nameof(CanAnalyzeParts));
+        OnPropertyChanged(nameof(CanExport));
         OnPropertyChanged(nameof(CanMovePreviousPage));
         OnPropertyChanged(nameof(CanMoveNextPage));
         OnPropertyChanged(nameof(CanMovePreviousGroupedPage));
@@ -900,6 +1274,40 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(GroupedPageNumberSummary));
         OnPropertyChanged(nameof(GroupedPageSummary));
         RaiseCommandStates();
+    }
+
+    private void SetSelectedRawPageNumber(int value)
+    {
+        if (SetProperty(ref _selectedRawPageNumber, value, nameof(SelectedRawPageNumber)))
+        {
+            OnPropertyChanged(nameof(PageNumberSummary));
+        }
+    }
+
+    private void SetSelectedGroupedPageNumber(int value)
+    {
+        if (SetProperty(ref _selectedGroupedPageNumber, value, nameof(SelectedGroupedPageNumber)))
+        {
+            OnPropertyChanged(nameof(GroupedPageNumberSummary));
+        }
+    }
+
+    private static void RebuildPageNumbers(ObservableCollection<int> target, int totalPages)
+    {
+        var safeTotal = Math.Max(1, totalPages);
+        if (target.Count == safeTotal
+            && target.Count > 0
+            && target[0] == 1
+            && target[^1] == safeTotal)
+        {
+            return;
+        }
+
+        target.Clear();
+        for (var page = 1; page <= safeTotal; page++)
+        {
+            target.Add(page);
+        }
     }
 
     private void RaiseCommandStates()
@@ -915,8 +1323,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _previousGroupedPageCommand.RaiseCanExecuteChanged();
         _nextGroupedPageCommand.RaiseCanExecuteChanged();
         _lastGroupedPageCommand.RaiseCanExecuteChanged();
+        _exportWorkbookCommand.RaiseCanExecuteChanged();
         _addFilterCommand.RaiseCanExecuteChanged();
         _clearAllFiltersCommand.RaiseCanExecuteChanged();
+        _removeAllFiltersCommand.RaiseCanExecuteChanged();
         _clearSelectedFilterCommand.RaiseCanExecuteChanged();
         _removeSelectedFilterCommand.RaiseCanExecuteChanged();
     }
@@ -937,6 +1347,28 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _addFilterCommand.RaiseCanExecuteChanged();
     }
 
+    public async Task ApplyRawSortAsync(string columnKey, SortDirection direction)
+    {
+        if (_loadedDataset is null)
+        {
+            return;
+        }
+
+        _rawSort = new QuerySort { ColumnKey = columnKey, Direction = direction };
+        await LoadPageAsync(1);
+    }
+
+    public async Task ApplyGroupedSortAsync(string columnKey, SortDirection direction)
+    {
+        if (_partAnalysisResult is null)
+        {
+            return;
+        }
+
+        _groupedSort = new QuerySort { ColumnKey = columnKey, Direction = direction };
+        await LoadGroupedPageAsync(1);
+    }
+
     private async Task ClearAllFiltersAsync()
     {
         foreach (var filter in ActiveFilters)
@@ -944,6 +1376,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             filter.Clear();
         }
 
+        await RefreshFilteredViewsAsync();
+    }
+
+    private async Task RemoveAllFiltersAsync()
+    {
+        foreach (var filter in ActiveFilters)
+        {
+            filter.PropertyChanged -= ActiveFilterPropertyChanged;
+            filter.Clear();
+        }
+
+        ActiveFilters.Clear();
+        SelectedActiveFilter = null;
+        SelectedAvailableFilter = null;
+        OnPropertyChanged(nameof(ActiveFilterCount));
+        OnPropertyChanged(nameof(ActiveFilterSummary));
+        OnPropertyChanged(nameof(CanAddFilter));
+        RaiseCommandStates();
         await RefreshFilteredViewsAsync();
     }
 
@@ -1014,6 +1464,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private async Task RefreshFilteredViewsAsync()
     {
         var version = ++_filterRefreshVersion;
+        IsFiltering = true;
         try
         {
             if (_loadedDataset is not null)
@@ -1034,6 +1485,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         catch (DuckDbDataException ex)
         {
             StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsFiltering = false;
         }
     }
 
@@ -1157,6 +1612,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             new FilterDefinition { Id = "computed_duplicate_part", DisplayName = "Duplicate Part", Kind = FilterKind.ComputedBoolean, Target = FilterTarget.GroupedPartsComputed },
             new FilterDefinition { Id = "computed_multiple_manufacturer", DisplayName = "Multiple Manufacturer", Kind = FilterKind.ComputedBoolean, Target = FilterTarget.GroupedPartsComputed },
+            new FilterDefinition { Id = "computed_reviewed", DisplayName = "Reviewed", Kind = FilterKind.ComputedBoolean, Target = FilterTarget.GroupedPartsComputed },
             new FilterDefinition { Id = "computed_part_row_count", DisplayName = "Part Row Count", Kind = FilterKind.ComputedRange, Target = FilterTarget.GroupedPartsComputed },
             new FilterDefinition { Id = "computed_manufacturer_count", DisplayName = "Manufacturer Count", Kind = FilterKind.ComputedRange, Target = FilterTarget.GroupedPartsComputed }
         };
@@ -1206,6 +1662,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void ClearPartAnalysis(string message)
     {
+        _groupedPageRequestVersion++;
+        _partDetailRequestVersion++;
+        _groupedSort = null;
         RemoveComputedFilters();
         _partAnalysisResult = null;
         GroupedPartsRowsView = null;
@@ -1213,6 +1672,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SelectedGroupedPart = null;
         GroupedPageNumber = 1;
         GroupedTotalPages = 1;
+        SetSelectedGroupedPageNumber(1);
+        RebuildPageNumbers(GroupedPageNumbers, 1);
         _totalGroupedRows = 0;
         _firstGroupedDisplayRow = 0;
         _lastGroupedDisplayRow = 0;
@@ -1310,6 +1771,123 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         return columns;
     }
+
+    public FilterSelectionSnapshot GetConstrainedFilterSnapshot()
+    {
+        return new FilterSelectionSnapshot
+        {
+            PartNumbers = Filter(SessionFilterColumn.PartNumber).SelectedValues.ToList(),
+            Categories = Filter(SessionFilterColumn.Category).SelectedValues.ToList(),
+            Manufacturers = Filter(SessionFilterColumn.Manufacturer).SelectedValues.ToList()
+        };
+    }
+
+    public async Task<IReadOnlyList<int>> GetMatchingExcelRowNumbersAsync()
+    {
+        return _processingSession is null ? Array.Empty<int>() : await _duckDbDataService.GetMatchingExcelRowNumbersAsync(GetConstrainedFilterSnapshot());
+    }
+
+    public void SavePreset(string name, bool overwrite)
+    {
+        var normalized = name.Trim();
+        if (string.IsNullOrWhiteSpace(normalized)) throw new InvalidOperationException("Preset name cannot be blank.");
+        var existing = _settings.FilterPresets.FirstOrDefault(preset => string.Equals(preset.Name, normalized, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null && !overwrite) throw new InvalidOperationException("A preset with that name already exists.");
+        var snapshot = GetConstrainedFilterSnapshot();
+        if (existing is null) _settings.FilterPresets.Add(new FilterPreset { Name = normalized, Selections = snapshot });
+        else { existing.Name = normalized; existing.Selections = snapshot; }
+        SaveSettings();
+        RefreshPresetNames();
+    }
+
+    public async Task<string?> LoadPresetAsync(string name)
+    {
+        var preset = _settings.FilterPresets.FirstOrDefault(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (preset is null) return null;
+        ApplyConstrainedSelections(preset.Selections);
+        await RefreshConstrainedFiltersAsync();
+        return HasUnavailableSelectedValues ? FormatUnavailableSelections() : null;
+    }
+
+    public void DeletePreset(string name)
+    {
+        var preset = _settings.FilterPresets.FirstOrDefault(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (preset is null) return;
+        _settings.FilterPresets.Remove(preset);
+        SaveSettings();
+        RefreshPresetNames();
+    }
+
+    private async Task InitializeConstrainedFiltersAsync()
+    {
+        ApplyConstrainedSelections(_settings.LastUsedFilterSelections);
+        await RefreshConstrainedFiltersAsync();
+    }
+
+    private async Task RefreshConstrainedFiltersAsync()
+    {
+        if (_processingSession is null) return;
+        var version = ++_constrainedFilterRequestVersion;
+        foreach (var filter in ConstrainedFilters)
+        {
+            var options = await _duckDbDataService.GetSessionFilterValuesAsync(filter.Column, filter.SearchText);
+            if (version != _constrainedFilterRequestVersion) return;
+            filter.ReplaceOptions(options);
+        }
+        var preview = await _duckDbDataService.GetManufacturerPreviewAsync();
+        if (version != _constrainedFilterRequestVersion) return;
+        ManufacturerPreview.Clear();
+        foreach (var item in preview) ManufacturerPreview.Add(item);
+        _unavailableSelections = await _duckDbDataService.GetUnavailableSelectionsAsync(GetConstrainedFilterSnapshot());
+        OnPropertyChanged(nameof(HasUnavailableSelectedValues));
+        OnPropertyChanged(nameof(UnavailableSelections));
+    }
+
+    private void ApplyConstrainedSelections(FilterSelectionSnapshot snapshot)
+    {
+        Filter(SessionFilterColumn.PartNumber).SetSelections(snapshot.PartNumbers);
+        Filter(SessionFilterColumn.Category).SetSelections(snapshot.Categories);
+        Filter(SessionFilterColumn.Manufacturer).SetSelections(snapshot.Manufacturers);
+    }
+
+    private void ConstrainedFilterPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ConstrainedFilterViewModel.SearchText)) _ = RefreshConstrainedFiltersAsync();
+        if (e.PropertyName == nameof(ConstrainedFilterViewModel.SelectedValues))
+        {
+            _settings.LastUsedFilterSelections = GetConstrainedFilterSnapshot();
+            SaveSettings();
+            _ = RefreshUnavailableSelectionsAsync();
+        }
+    }
+
+    private async Task RefreshUnavailableSelectionsAsync()
+    {
+        if (_processingSession is null) return;
+        _unavailableSelections = await _duckDbDataService.GetUnavailableSelectionsAsync(GetConstrainedFilterSnapshot());
+        OnPropertyChanged(nameof(HasUnavailableSelectedValues));
+        OnPropertyChanged(nameof(UnavailableSelections));
+    }
+
+    private void ClearConstrainedFilterSessionState()
+    {
+        _constrainedFilterRequestVersion++;
+        ManufacturerPreview.Clear();
+        _unavailableSelections = Array.Empty<UnavailableFilterSelection>();
+        foreach (var filter in ConstrainedFilters) filter.ReplaceOptions(Array.Empty<FilterValueOption>());
+        OnPropertyChanged(nameof(HasUnavailableSelectedValues));
+        OnPropertyChanged(nameof(UnavailableSelections));
+    }
+
+    private void RefreshPresetNames()
+    {
+        PresetNames.Clear();
+        foreach (var preset in _settings.FilterPresets.OrderBy(preset => preset.Name, StringComparer.OrdinalIgnoreCase)) PresetNames.Add(preset.Name);
+    }
+
+    private ConstrainedFilterViewModel Filter(SessionFilterColumn column) => ConstrainedFilters.Single(filter => filter.Column == column);
+
+    private string FormatUnavailableSelections() => string.Join("; ", _unavailableSelections.Select(item => $"{item.Column}: {string.Join(", ", item.Values.Take(5))}"));
 
     public void Dispose()
     {
