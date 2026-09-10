@@ -30,14 +30,20 @@ public partial class FilterWindow : Window
     {
         try
         {
-            if (DataContext is MainViewModel viewModel && !string.IsNullOrWhiteSpace(viewModel.PresetName)) viewModel.SavePreset(viewModel.PresetName, overwrite);
+            if (DataContext is not MainViewModel viewModel || string.IsNullOrWhiteSpace(viewModel.PresetName)) return;
+            viewModel.SavePreset(viewModel.PresetName, overwrite);
+            MessageBox.Show(overwrite ? "Preset updated." : "Preset saved.", "Preset", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (InvalidOperationException error) { MessageBox.Show(error.Message, "Preset", MessageBoxButton.OK, MessageBoxImage.Warning); }
     }
 
     private void DeletePreset_Click(object sender, RoutedEventArgs e)
     {
-        if (DataContext is MainViewModel viewModel && !string.IsNullOrWhiteSpace(viewModel.PresetName)) viewModel.DeletePreset(viewModel.PresetName);
+        if (DataContext is not MainViewModel viewModel || string.IsNullOrWhiteSpace(viewModel.PresetName)) return;
+        if (!viewModel.PresetNames.Contains(viewModel.PresetName, StringComparer.OrdinalIgnoreCase)) return;
+        viewModel.DeletePreset(viewModel.PresetName);
+        viewModel.PresetName = "Generic";
+        MessageBox.Show("Preset deleted.", "Preset", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void ClearFilter_Click(object sender, RoutedEventArgs e)
