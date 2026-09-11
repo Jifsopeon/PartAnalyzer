@@ -6,17 +6,21 @@ namespace ReportExtract.Services;
 
 public sealed class SettingsService
 {
+    private const string PreviousApplicationDirectoryName = "ReportExtract";
     private const string LegacyApplicationDirectoryName = "PartAnalyzer";
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true
     };
 
-    public string SettingsDirectory { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "ReportExtract");
+    public string SettingsDirectory { get; } = PortableApplicationPaths.Current.DataDirectory;
 
     public string SettingsPath => Path.Combine(SettingsDirectory, "settings.json");
+
+    private string PreviousSettingsPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        PreviousApplicationDirectoryName,
+        "settings.json");
 
     private string LegacySettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -32,7 +36,12 @@ public sealed class SettingsService
                 return LoadSettingsFile(SettingsPath);
             }
 
-            if (!File.Exists(LegacySettingsPath))
+            var migrationSourcePath = File.Exists(PreviousSettingsPath)
+                ? PreviousSettingsPath
+                : File.Exists(LegacySettingsPath)
+                    ? LegacySettingsPath
+                    : null;
+            if (migrationSourcePath is null)
             {
                 return new AppSettings();
             }
@@ -40,16 +49,18 @@ public sealed class SettingsService
             try
             {
                 Directory.CreateDirectory(SettingsDirectory);
-                File.Copy(LegacySettingsPath, SettingsPath, overwrite: false);
+                File.Copy(migrationSourcePath, SettingsPath, overwrite: false);
                 return LoadSettingsFile(SettingsPath);
             }
-            catch (IOException)
+            catch (IOException ex)
             {
-                return LoadSettingsFile(LegacySettingsPath);
+                PerformanceLogger.Write($"SETTINGS_MIGRATION_FAILED source=\"{migrationSourcePath}\" message=\"{ex.Message}\"");
+                return LoadSettingsFile(migrationSourcePath);
             }
-            catch (UnauthorizedAccessException)
+            catch (UnauthorizedAccessException ex)
             {
-                return LoadSettingsFile(LegacySettingsPath);
+                PerformanceLogger.Write($"SETTINGS_MIGRATION_FAILED source=\"{migrationSourcePath}\" message=\"{ex.Message}\"");
+                return LoadSettingsFile(migrationSourcePath);
             }
         }
         catch (JsonException)

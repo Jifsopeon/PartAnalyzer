@@ -19,11 +19,7 @@ public sealed class DuckDbDataService : IDisposable
     public DuckDbDataService(string? databasePath = null)
     {
         _databasePath = string.IsNullOrWhiteSpace(databasePath)
-            ? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ReportExtract",
-                "Temp",
-                "session.duckdb")
+            ? Path.Combine(PortableApplicationPaths.Current.TempDirectory, "session.duckdb")
             : databasePath;
         CleanupStaleSessionFiles();
     }

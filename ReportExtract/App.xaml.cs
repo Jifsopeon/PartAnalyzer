@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 using ReportExtract.Services;
@@ -8,6 +9,21 @@ public partial class App : Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
+        try
+        {
+            PortableApplicationPaths.Current.EnsureWritable();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(
+                "ReportExtract cannot write to its application folder. Move the extracted ReportExtract folder to a writable location such as Documents or Desktop.",
+                "ReportExtract",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Shutdown(-1);
+            return;
+        }
+
         base.OnStartup(e);
         DispatcherUnhandledException += AppDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += CurrentDomainUnhandledException;

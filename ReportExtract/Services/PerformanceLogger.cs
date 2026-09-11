@@ -7,10 +7,7 @@ public static class PerformanceLogger
 {
     private const long MaxLogBytes = 1_000_000;
     private static readonly object SyncRoot = new();
-    private static readonly string LogDirectory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "ReportExtract",
-        "Logs");
+    private static readonly string LogDirectory = PortableApplicationPaths.Current.LogsDirectory;
 
     private static readonly string LogPath = Path.Combine(LogDirectory, "performance.log");
 
