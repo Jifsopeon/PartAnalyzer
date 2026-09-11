@@ -8,12 +8,6 @@ public sealed class AppSettings
 
     public string? PreferredWorksheet { get; set; }
 
-    public ColumnMapping? PrimaryPartIdentifierMapping { get; set; }
-
-    public ColumnMapping? ManufacturerMapping { get; set; }
-
-    public ColumnMapping? ManufacturerPartNumberMapping { get; set; }
-
     public List<FilterPreset> FilterPresets { get; set; } = new();
 
     public FilterSelectionSnapshot LastUsedFilterSelections { get; set; } = new();

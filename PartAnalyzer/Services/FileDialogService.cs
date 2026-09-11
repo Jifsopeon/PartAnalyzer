@@ -11,7 +11,7 @@ public sealed class FileDialogService
         var dialog = new OpenFileDialog
         {
             Title = "Import Excel File",
-            Filter = "Excel workbooks (*.xlsx;*.xlsm)|*.xlsx;*.xlsm",
+            Filter = "Excel workbooks (*.xlsx)|*.xlsx",
             CheckFileExists = true,
             Multiselect = false
         };
@@ -42,16 +42,6 @@ public sealed class FileDialogService
         }
 
         return dialog.ShowDialog() == true ? dialog.FileName : null;
-    }
-
-    public bool ConfirmDiscardUnsavedChanges(string message)
-    {
-        return MessageBox.Show(
-            message,
-            "Unsaved Changes",
-            MessageBoxButton.OKCancel,
-            MessageBoxImage.Warning,
-            MessageBoxResult.Cancel) == MessageBoxResult.OK;
     }
 
     public bool ConfirmUnavailableSelections(string message)
