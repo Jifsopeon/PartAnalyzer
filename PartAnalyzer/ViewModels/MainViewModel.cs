@@ -19,6 +19,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly AsyncRelayCommand _importWorkbookCommand;
     private readonly AsyncRelayCommand _loadDataCommand;
     private readonly AsyncRelayCommand _exportFilteredWorkbookCommand;
+    private readonly RelayCommand _cancelExportCommand;
     private WorkbookInfo? _currentWorkbook;
     private WorksheetInfo? _selectedWorksheet;
     private DataLoadResult? _loadedDataset;
@@ -28,6 +29,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _isLoadingData;
     private bool _isExporting;
     private bool _isFiltering;
+    private CancellationTokenSource? _exportCancellationTokenSource;
+    private int _exportProgressPercent;
+    private string _exportProgressText = string.Empty;
+    private bool _isExportProgressIndeterminate;
     private string _statusMessage = "Ready.";
     private string _dataStateMessage = "No workbook selected.";
     private string? _presetName;
@@ -46,6 +51,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _importWorkbookCommand = new AsyncRelayCommand(ImportWorkbookAsync, () => CanStartInspection);
         _loadDataCommand = new AsyncRelayCommand(LoadDataAsync, () => CanLoadData);
         _exportFilteredWorkbookCommand = new AsyncRelayCommand(ExportFilteredWorkbookAsync, () => CanExportFilteredWorkbook);
+        _cancelExportCommand = new RelayCommand(CancelExport, () => CanCancelExport);
         foreach (var filter in ConstrainedFilters) filter.PropertyChanged += ConstrainedFilterPropertyChanged;
         RefreshPresetNames();
         PresetName = "Generic";
@@ -63,6 +69,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand ImportWorkbookCommand => _importWorkbookCommand;
     public AsyncRelayCommand LoadDataCommand => _loadDataCommand;
     public AsyncRelayCommand ExportFilteredWorkbookCommand => _exportFilteredWorkbookCommand;
+    public RelayCommand CancelExportCommand => _cancelExportCommand;
 
     public WorkbookInfo? CurrentWorkbook
     {
@@ -127,7 +134,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public bool IsInspecting { get => _isInspecting; private set { if (SetProperty(ref _isInspecting, value)) RefreshBusyState(); } }
     public bool IsLoadingData { get => _isLoadingData; private set { if (SetProperty(ref _isLoadingData, value)) RefreshBusyState(); } }
-    public bool IsExporting { get => _isExporting; private set { if (SetProperty(ref _isExporting, value)) RefreshBusyState(); } }
+    public bool IsExporting
+    {
+        get => _isExporting;
+        private set
+        {
+            if (!SetProperty(ref _isExporting, value)) return;
+            OnPropertyChanged(nameof(IsMainInteractionEnabled));
+            OnPropertyChanged(nameof(IsFilterInteractionEnabled));
+            OnPropertyChanged(nameof(CanCancelExport));
+            _cancelExportCommand.RaiseCanExecuteChanged();
+            RefreshBusyState();
+        }
+    }
     public bool IsFiltering { get => _isFiltering; private set { if (SetProperty(ref _isFiltering, value)) RefreshBusyState(); } }
     public bool IsBusy => IsInspecting || IsLoadingData || IsExporting || IsFiltering;
     public bool CanStartInspection => !IsBusy;
@@ -136,12 +155,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public bool HasValidatedProcessingSession => _processingSession is not null;
     public MavlResult? MavlResult => _mavlResult;
     public bool CanExportFilteredWorkbook => !IsBusy && _processingSession is not null && _mavlResult is not null && _loadedDataset is not null;
+    public bool IsMainInteractionEnabled => !IsExporting;
+    public bool IsFilterInteractionEnabled => !IsExporting;
+    public bool CanCancelExport => IsExporting && _exportCancellationTokenSource is not null && !_exportCancellationTokenSource.IsCancellationRequested;
+    public int ExportProgressPercent { get => _exportProgressPercent; private set => SetProperty(ref _exportProgressPercent, value); }
+    public string ExportProgressText { get => _exportProgressText; private set => SetProperty(ref _exportProgressText, value); }
+    public bool IsExportProgressIndeterminate { get => _isExportProgressIndeterminate; private set => SetProperty(ref _isExportProgressIndeterminate, value); }
     public string StatusMessage { get => _statusMessage; private set => SetProperty(ref _statusMessage, value); }
     public string DataStateMessage { get => _dataStateMessage; private set => SetProperty(ref _dataStateMessage, value); }
     public string? PresetName { get => _presetName; set => SetProperty(ref _presetName, value); }
     public bool HasUnavailableSelectedValues => _unavailableSelections.Count > 0;
     public IReadOnlyList<UnavailableFilterSelection> UnavailableSelections => _unavailableSelections;
-    public string ConstrainedFilterSummary => string.Join("   ", ConstrainedFilters.Select(filter => $"{filter.DisplayName}: {(filter.SelectedValues.Count == 0 ? "none" : $"{filter.SelectedValues.Count} selected")}"));
+    public string PartNumberFilterSummary => BuildFilterSummary(SessionFilterColumn.PartNumber);
+    public string CategoryFilterSummary => BuildFilterSummary(SessionFilterColumn.Category);
+    public string ManufacturerFilterSummary => BuildFilterSummary(SessionFilterColumn.Manufacturer);
 
     private async Task ImportWorkbookAsync()
     {
@@ -204,18 +231,37 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         var unavailable = await _duckDbDataService.GetUnavailableSelectionsAsync(GetConstrainedFilterSnapshot());
         if (unavailable.Count > 0 && !_fileDialogService.ConfirmUnavailableSelections("Some selected values are unavailable and will match zero rows. Continue with export?")) return;
         var rows = await GetMatchingExcelRowNumbersAsync();
-        if (rows.Count == 0) { StatusMessage = "No matching rows."; return; }
+        if (rows.Count == 0)
+        {
+            StatusMessage = "No matching rows.";
+            _fileDialogService.ShowNoMatchingRows();
+            return;
+        }
         var destination = _fileDialogService.SelectExportWorkbook(CreateSuggestedExportFileName(_processingSession.WorkbookPath), Path.GetDirectoryName(_processingSession.WorkbookPath));
         if (destination is null) return;
+        using var cancellationTokenSource = new CancellationTokenSource();
+        _exportCancellationTokenSource = cancellationTokenSource;
         IsExporting = true;
-        StatusMessage = "Exporting...";
+        UpdateExportProgress(new ExportProgress(0, "Preparing export...", 0, rows.Count));
         try
         {
-            var result = await _fidelityExportService.ExportAsync(_processingSession, _mavlResult, rows, destination);
+            var progress = new Progress<ExportProgress>(UpdateExportProgress);
+            var result = await _fidelityExportService.ExportAsync(_processingSession, _mavlResult, rows, destination, cancellationTokenSource.Token, progress);
             StatusMessage = $"Export completed: {result.ExportedDataRowCount} rows to {result.DestinationPath}";
         }
+        catch (OperationCanceledException) when (cancellationTokenSource.IsCancellationRequested)
+        {
+            StatusMessage = "Export cancelled.";
+        }
         catch (DuckDbDataException ex) { StatusMessage = ex.Message; }
-        finally { IsExporting = false; }
+        finally
+        {
+            _exportCancellationTokenSource = null;
+            OnPropertyChanged(nameof(CanCancelExport));
+            _cancelExportCommand.RaiseCanExecuteChanged();
+            IsExporting = false;
+            ResetExportProgress();
+        }
     }
 
     public FilterSelectionSnapshot GetConstrainedFilterSnapshot() => new()
@@ -284,6 +330,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _unavailableSelections = await _duckDbDataService.GetUnavailableSelectionsAsync(GetConstrainedFilterSnapshot());
             OnPropertyChanged(nameof(HasUnavailableSelectedValues));
             OnPropertyChanged(nameof(UnavailableSelections));
+            RefreshFilterSummaryProperties();
         }
         finally { IsFiltering = false; }
     }
@@ -299,7 +346,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         if (e.PropertyName == nameof(ConstrainedFilterViewModel.SearchText)) _ = RefreshConstrainedFiltersAsync();
         if (e.PropertyName != nameof(ConstrainedFilterViewModel.SelectedValues)) return;
-        OnPropertyChanged(nameof(ConstrainedFilterSummary));
+        RefreshFilterSummaryProperties();
         _settings.LastUsedFilterSelections = GetConstrainedFilterSnapshot();
         SaveSettings();
         _ = RefreshUnavailableSelectionsAsync();
@@ -363,10 +410,42 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _exportFilteredWorkbookCommand.RaiseCanExecuteChanged();
     }
 
+    private void CancelExport()
+    {
+        if (_exportCancellationTokenSource is null || _exportCancellationTokenSource.IsCancellationRequested) return;
+        _exportCancellationTokenSource.Cancel();
+        ExportProgressText = "Cancelling export...";
+        IsExportProgressIndeterminate = true;
+        OnPropertyChanged(nameof(CanCancelExport));
+        _cancelExportCommand.RaiseCanExecuteChanged();
+    }
+
+    private void UpdateExportProgress(ExportProgress progress)
+    {
+        ExportProgressPercent = progress.Percent;
+        ExportProgressText = progress.Stage;
+        IsExportProgressIndeterminate = progress.IsIndeterminate;
+        StatusMessage = progress.Stage;
+    }
+
+    private void ResetExportProgress()
+    {
+        ExportProgressPercent = 0;
+        ExportProgressText = string.Empty;
+        IsExportProgressIndeterminate = false;
+    }
+
     private void RefreshPresetNames()
     {
         PresetNames.Clear();
         foreach (var preset in _settings.FilterPresets.OrderBy(preset => preset.Name, StringComparer.OrdinalIgnoreCase)) PresetNames.Add(preset.Name);
+    }
+
+    private void RefreshFilterSummaryProperties()
+    {
+        OnPropertyChanged(nameof(PartNumberFilterSummary));
+        OnPropertyChanged(nameof(CategoryFilterSummary));
+        OnPropertyChanged(nameof(ManufacturerFilterSummary));
     }
 
     private void SaveSettings()
@@ -377,6 +456,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     }
 
     private ConstrainedFilterViewModel Filter(SessionFilterColumn column) => ConstrainedFilters.Single(filter => filter.Column == column);
+    private string BuildFilterSummary(SessionFilterColumn column)
+    {
+        var filter = Filter(column);
+        var selectedValues = filter.SelectedValues
+            .Select(value => filter.Options.FirstOrDefault(option => string.Equals(option.Value, value, StringComparison.Ordinal))?.Option.DisplayValue
+                ?? (value == FilterSelectionValues.BlankCategory ? "(Blank)" : value))
+            .Take(2)
+            .ToList();
+        var selectionText = selectedValues.Count == 0
+            ? "none"
+            : string.Join(", ", selectedValues) + (filter.SelectedValues.Count > 2 ? ", more..." : string.Empty);
+        return $"{filter.DisplayName}: {selectionText}";
+    }
     private static string CreateSuggestedExportFileName(string sourcePath) => $"{Path.GetFileNameWithoutExtension(sourcePath)}_Processed.xlsx";
     private string FormatUnavailableSelections() => string.Join("; ", _unavailableSelections.Select(item => $"{item.Column}: {string.Join(", ", item.Values.Take(5))}"));
     public void Dispose() => _duckDbDataService.Dispose();

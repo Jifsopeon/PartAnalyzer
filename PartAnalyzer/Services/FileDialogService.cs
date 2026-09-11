@@ -58,4 +58,13 @@ public sealed class FileDialogService
     {
         return MessageBox.Show(message, "Unavailable filter selections", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) == MessageBoxResult.OK;
     }
+
+    public void ShowNoMatchingRows()
+    {
+        MessageBox.Show(
+            "No matching rows were found for the current filter selections.",
+            "No Matching Rows",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
+    }
 }
