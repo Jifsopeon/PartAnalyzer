@@ -8,10 +8,10 @@ public sealed class PortableApplicationPaths
 
     private PortableApplicationPaths()
     {
-        var executableDirectory = Path.GetFullPath(AppContext.BaseDirectory);
-        var directoryName = Path.GetFileName(executableDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var executableDirectory = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var directoryName = Path.GetFileName(executableDirectory);
         ApplicationRoot = string.Equals(directoryName, "Backend", StringComparison.OrdinalIgnoreCase)
-            ? Directory.GetParent(executableDirectory)?.FullName
+            ? new DirectoryInfo(executableDirectory).Parent?.FullName
                 ?? throw new InvalidOperationException("The portable application root could not be resolved.")
             : executableDirectory;
         DataDirectory = Path.Combine(ApplicationRoot, "Data");

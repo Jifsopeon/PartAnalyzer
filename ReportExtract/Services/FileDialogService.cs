@@ -57,4 +57,9 @@ public sealed class FileDialogService
             MessageBoxButton.OK,
             MessageBoxImage.Information);
     }
+
+    public void ShowValidationError(string message)
+    {
+        MessageBox.Show(message, "ReportExtract", MessageBoxButton.OK, MessageBoxImage.Error);
+    }
 }

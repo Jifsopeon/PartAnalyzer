@@ -220,7 +220,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             StatusMessage = $"Validated {SelectedWorksheet.Name}. {_loadedDataset.ImportedRowCount} eligible rows and {_loadedDataset.ImportedColumnCount} effective columns are available for later processing.";
         }
         catch (DuckDbDataException ex) { ClearLoadedData(ex.Message); StatusMessage = ex.Message; }
-        catch (WorksheetValidationException ex) { ClearLoadedData(ex.Message); StatusMessage = ex.Message; }
+        catch (WorksheetValidationException ex)
+        {
+            ClearLoadedData(ex.Message);
+            StatusMessage = ex.Message;
+            _fileDialogService.ShowValidationError(ex.Message);
+        }
         catch (OperationCanceledException) { ClearLoadedData("Data load was cancelled."); StatusMessage = "Data load was cancelled."; }
         finally { IsLoadingData = false; RaiseCommandStates(); }
     }
